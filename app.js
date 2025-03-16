@@ -29,18 +29,57 @@ db.serialize(() => {
   )`);
 });
 
-// Generate server RSA key pair
-const serverKeys = crypto.generateKeyPairSync('rsa', {
-  modulusLength: 2048,
-  publicKeyEncoding: {
-    type: 'spki',
-    format: 'pem'
-  },
-  privateKeyEncoding: {
-    type: 'pkcs8',
-    format: 'pem'
+// Path for RSA key storage
+const KEYS_PATH = path.join(DATA_DIR, 'server_keys.json');
+
+// Function to load or generate server RSA key pair
+function loadOrGenerateKeys() {
+  try {
+    // Check if keys already exist
+    if (fs.existsSync(KEYS_PATH)) {
+      console.log('Loading existing RSA keys...');
+      const keys = JSON.parse(fs.readFileSync(KEYS_PATH, 'utf8'));
+      return keys;
+    } else {
+      // Generate new RSA key pair
+      console.log('Generating new RSA keys...');
+      const serverKeys = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: {
+          type: 'spki',
+          format: 'pem'
+        },
+        privateKeyEncoding: {
+          type: 'pkcs8',
+          format: 'pem'
+        }
+      });
+
+      // Save keys to file
+      fs.writeFileSync(KEYS_PATH, JSON.stringify(serverKeys, null, 2));
+      console.log('RSA keys generated and saved.');
+      return serverKeys;
+    }
+  } catch (error) {
+    console.error('Error handling server keys:', error);
+    // Fallback to generating new keys if there's an error
+    const serverKeys = crypto.generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: {
+        type: 'spki',
+        format: 'pem'
+      },
+      privateKeyEncoding: {
+        type: 'pkcs8',
+        format: 'pem'
+      }
+    });
+    return serverKeys;
   }
-});
+}
+
+// Load or generate server keys
+const serverKeys = loadOrGenerateKeys();
 
 // Display server public key for client setup
 console.log('Server started. Server public key:');
