@@ -557,6 +557,274 @@ function authenticateToken(req, res, next) {
 }
 
 
+// Add these additional imports if needed
+const multer = require('multer');
+const sharp = require('sharp');
+const { v4: uuidv4 } = require('uuid');
+
+// Initialize necessary directories
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+// Create directories if they don't exist
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+// Set up multer storage configuration
+const storage = multer.diskStorage({
+  destination: function(req, file, cb) {
+    // Create a temp directory for uploads
+    const tempDir = path.join(UPLOADS_DIR, 'temp');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    cb(null, tempDir);
+  },
+  filename: function(req, file, cb) {
+    // Create a unique filename
+    const uniqueName = uuidv4() + path.extname(file.originalname);
+    cb(null, uniqueName);
+  }
+});
+
+// Configure multer file filter and limits
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10 MB limit
+  },
+  fileFilter: function(req, file, cb) {
+    // Accept only image files
+    if (!file.originalname.match(/\.(jpg|jpeg|png|gif)$/)) {
+      return cb(new Error('Only image files are allowed!'), false);
+    }
+    cb(null, true);
+  }
+});
+
+// Initialize the images table in the database
+db.serialize(() => {
+  // Create images table if not exists
+  db.run(`CREATE TABLE IF NOT EXISTS images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    original_filename TEXT,
+    storage_filename TEXT,
+    path TEXT,
+    size INTEGER,
+    resolution TEXT,
+    upload_date INTEGER,
+    FOREIGN KEY (user_id) REFERENCES users(username)
+  )`);
+});
+
+// Image upload endpoint
+app.post('/api/upload', upload.single('image'), async (req, res) => {
+  try {
+    // Extract auth and metadata from request
+    const authHeader = req.body.auth;
+    const encryptedMetadata = req.body.metadata;
+    const imageFile = req.file;
+
+    // Check if all required fields are present
+    if (!authHeader || !encryptedMetadata || !imageFile) {
+      // Clean up uploaded file if it exists
+      if (imageFile && imageFile.path) {
+        fs.unlink(imageFile.path, (err) => {
+          if (err) console.error('Error deleting temp file:', err);
+        });
+      }
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Process the authentication token
+    const token = authHeader.split(' ')[1];
+
+    jwt.verify(token, process.env.JWT_SECRET || 'default_jwt_secret', async (err, user) => {
+      if (err) {
+        // Clean up the uploaded file
+        fs.unlink(imageFile.path, (err) => {
+          if (err) console.error('Error deleting temp file:', err);
+        });
+        return res.status(403).json({ error: 'Invalid or expired token' });
+      }
+
+      try {
+        // Decrypt the metadata
+        const decryptedMetadata = JSON.parse(decryptWithPrivateKey(serverKeys.privateKey, encryptedMetadata));
+        const { fileName, size, resolution } = decryptedMetadata;
+
+        // Process and store the image
+        const imageInfo = await processAndStoreImage(imageFile.path, fileName, user.username);
+        
+        // Save image metadata to database
+        const dbImageId = await saveImageToDatabase(user.username, fileName, imageInfo);
+
+        // Get user's public key for encrypting the response
+        const userPublicKey = await getUserPublicKey(user.username);
+        
+        if (!userPublicKey) {
+          return res.status(400).json({ error: 'User public key not found' });
+        }
+
+        // Create and encrypt the response
+        const responseData = JSON.stringify({
+          success: true,
+          remoteUrl: `/api/images/${dbImageId}`,
+          message: 'Image uploaded successfully'
+        });
+
+        // Encrypt the response using hybrid encryption
+        const encryptedResponse = hybridEncrypt(userPublicKey, responseData);
+
+        // Send the encrypted response to the client
+        res.json({ encryptedResponse });
+
+      } catch (error) {
+        console.error('Error processing upload:', error);
+        
+        // Clean up the uploaded file
+        if (imageFile && imageFile.path) {
+          fs.unlink(imageFile.path, (err) => {
+            if (err) console.error('Error deleting temp file:', err);
+          });
+        }
+        
+        res.status(500).json({ error: 'Error processing upload: ' + error.message });
+      }
+    });
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ error: 'Server error during upload' });
+  }
+});
+
+// Function to process and store the uploaded image
+async function processAndStoreImage(tempPath, originalFilename, username) {
+  try {
+    // Generate a unique filename
+    const storageFilename = `${uuidv4()}${path.extname(originalFilename)}`;
+    
+    // Create user directory if it doesn't exist
+    const userDir = path.join(UPLOADS_DIR, username);
+    if (!fs.existsSync(userDir)) {
+      fs.mkdirSync(userDir, { recursive: true });
+    }
+    
+    // Define the path where the image will be stored
+    const storagePath = path.join(userDir, storageFilename);
+    
+    // Get image metadata
+    const metadata = await sharp(tempPath).metadata();
+    
+    // Resize and optimize the image
+    await sharp(tempPath)
+      .resize({
+        width: Math.min(metadata.width, 1920),
+        height: Math.min(metadata.height, 1080),
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .jpeg({ quality: 85 })
+      .toFile(storagePath);
+    
+    // Delete the temporary file
+    fs.unlink(tempPath, (err) => {
+      if (err) console.error('Error deleting temp file:', err);
+    });
+    
+    // Get the file size
+    const stats = fs.statSync(storagePath);
+    
+    return {
+      path: storagePath,
+      storagePath: path.join(username, storageFilename).replace(/\\/g, '/'),
+      storageFilename: storageFilename,
+      size: stats.size,
+      resolution: `${metadata.width}x${metadata.height}`
+    };
+  } catch (error) {
+    console.error('Error processing image:', error);
+    throw error;
+  }
+}
+
+// Function to save image metadata to the database
+function saveImageToDatabase(username, originalFilename, imageInfo) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO images (user_id, original_filename, storage_filename, path, size, resolution, upload_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        username,
+        originalFilename,
+        imageInfo.storageFilename,
+        imageInfo.storagePath,
+        imageInfo.size,
+        imageInfo.resolution,
+        Date.now()
+      ],
+      function(err) {
+        if (err) {
+          return reject(err);
+        }
+        
+        resolve(this.lastID);
+      }
+    );
+  });
+}
+
+// Function to get a user's public key from the database
+function getUserPublicKey(username) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      'SELECT public_key FROM users WHERE username = ?',
+      [username],
+      (err, row) => {
+        if (err) {
+          return reject(err);
+        }
+        
+        if (!row) {
+          return resolve(null);
+        }
+        
+        resolve(row.public_key);
+      }
+    );
+  });
+}
+
+// Endpoint to retrieve images by ID
+app.get('/api/images/:id', authenticateToken, (req, res) => {
+  const imageId = req.params.id;
+  const username = req.user.username;
+  
+  // Verify that the user has access to this image
+  db.get(
+    'SELECT * FROM images WHERE id = ? AND user_id = ?',
+    [imageId, username],
+    (err, image) => {
+      if (err) {
+        console.error('Database error:', err);
+        return res.status(500).json({ error: 'Server error' });
+      }
+      
+      if (!image) {
+        return res.status(404).json({ error: 'Image not found or access denied' });
+      }
+      
+      // Send the image file
+      res.sendFile(path.join(UPLOADS_DIR, image.path));
+    }
+  );
+});
+
+
 
 // Start the server
 app.listen(PORT, () => {
