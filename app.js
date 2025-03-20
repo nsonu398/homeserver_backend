@@ -465,10 +465,10 @@ app.post('/api/verify_registration', (req, res) => {
 // User login endpoint
 app.post('/api/login', (req, res) => {
   try {
-    const { encryptedData } = req.body;
+    const { encryptedData, publicKey } = req.body;
     
-    if (!encryptedData) {
-      return res.status(400).json({ error: 'Missing encrypted data' });
+    if (!encryptedData || !publicKey) {
+      return res.status(400).json({ error: 'Missing required data' });
     }
     
     // Decrypt the request data using the server's private key
@@ -488,7 +488,7 @@ app.post('/api/login', (req, res) => {
     
     // Verify credentials
     db.get(
-      'SELECT password_hash, public_key FROM users WHERE username = ? AND registered = 1',
+      'SELECT password_hash FROM users WHERE username = ? AND registered = 1',
       [username],
       async (err, user) => {
         if (err) {
@@ -500,10 +500,6 @@ app.post('/api/login', (req, res) => {
           return res.status(401).json({ error: 'Invalid credentials' });
         }
         
-        if (!user.public_key) {
-          return res.status(400).json({ error: 'Client public key not found' });
-        }
-        
         // Compare password
         const passwordMatch = await bcrypt.compare(password, user.password_hash);
         
@@ -511,24 +507,32 @@ app.post('/api/login', (req, res) => {
           return res.status(401).json({ error: 'Invalid credentials' });
         }
         
-        // Generate JWT token
-        const token = jwt.sign(
-          { username },
-          process.env.JWT_SECRET || 'default_jwt_secret',
-          { expiresIn: '7d' }
-        );
-        
-        // Create response payload
-        const responsePayload = JSON.stringify({ 
-          success: true, 
-          token,
-          message: 'Login successful'
+        // Update user's public key in the database
+        db.run('UPDATE users SET public_key = ? WHERE username = ?', [publicKey, username], (err) => {
+          if (err) {
+            console.error('Error updating public key:', err);
+            return res.status(500).json({ error: 'Failed to update public key' });
+          }
+          
+          // Generate JWT token
+          const token = jwt.sign(
+            { username },
+            process.env.JWT_SECRET || 'default_jwt_secret',
+            { expiresIn: '7d' }
+          );
+          
+          // Create response payload
+          const responsePayload = JSON.stringify({ 
+            success: true, 
+            token,
+            message: 'Login successful'
+          });
+          
+          // Use hybrid encryption for the response with the UPDATED public key
+          const encryptedResponse = hybridEncrypt(publicKey, responsePayload);
+          
+          res.json({ encryptedResponse });
         });
-        
-        // Use hybrid encryption for the response
-        const encryptedResponse = hybridEncrypt(user.public_key, responsePayload);
-        
-        res.json({ encryptedResponse });
       }
     );
   } catch (error) {
