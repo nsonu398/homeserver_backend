@@ -621,6 +621,8 @@ db.serialize(() => {
     size INTEGER,
     resolution TEXT,
     upload_date INTEGER,
+    image_id TEXT,
+    updated_time INTEGER,
     FOREIGN KEY (user_id) REFERENCES users(username)
   )`);
 });
@@ -659,13 +661,13 @@ app.post('/api/upload', upload.single('image'), async (req, res) => {
       try {
         // Decrypt the metadata
         const decryptedMetadata = JSON.parse(decryptWithPrivateKey(serverKeys.privateKey, encryptedMetadata));
-        const { fileName, size, resolution } = decryptedMetadata;
+        const { fileName, imageId, updatedTime } = decryptedMetadata;
 
         // Process and store the image
         const imageInfo = await processAndStoreImage(imageFile.path, fileName, user.username);
         
-        // Save image metadata to database
-        const dbImageId = await saveImageToDatabase(user.username, fileName, imageInfo);
+        // Save image metadata to database (now including imageId and updatedTime)
+        const dbImageId = await saveImageToDatabase(user.username, fileName, imageInfo, imageId, updatedTime);
 
         // Get user's public key for encrypting the response
         const userPublicKey = await getUserPublicKey(user.username);
@@ -757,11 +759,20 @@ async function processAndStoreImage(tempPath, originalFilename, username) {
 }
 
 // Function to save image metadata to the database
-function saveImageToDatabase(username, originalFilename, imageInfo) {
+function saveImageToDatabase(username, originalFilename, imageInfo, imageId, updatedTime) {
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO images (user_id, original_filename, storage_filename, path, size, resolution, upload_date)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO images (
+        user_id, 
+        original_filename, 
+        storage_filename, 
+        path, 
+        size, 
+        resolution, 
+        upload_date, 
+        image_id, 
+        updated_time
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         username,
         originalFilename,
@@ -769,7 +780,9 @@ function saveImageToDatabase(username, originalFilename, imageInfo) {
         imageInfo.storagePath,
         imageInfo.size,
         imageInfo.resolution,
-        Date.now()
+        Date.now(),
+        imageId || null,  // Handle case where imageId might not be provided
+        updatedTime || Date.now()  // Use current time as fallback
       ],
       function(err) {
         if (err) {
