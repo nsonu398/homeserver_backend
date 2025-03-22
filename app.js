@@ -841,6 +841,32 @@ app.get('/api/images/:id', authenticateToken, (req, res) => {
   );
 });
 
+app.get('/api/images', authenticateToken, (req, res) => {
+  const username = req.user.username;
+  
+  db.all(
+    'SELECT id, original_filename, storage_filename, path, size, resolution, upload_date, image_id, updated_time FROM images WHERE user_id = ?',
+    [username],
+    async (err, images) => {
+      if (err) {
+        return res.status(500).json({ error: 'Server error' });
+      }
+      
+      const userPublicKey = await getUserPublicKey(username);
+      if (!userPublicKey) {
+        return res.status(400).json({ error: 'User public key not found' });
+      }
+
+      const responseData = JSON.stringify({
+        success: true,
+        images: images
+      });
+
+      const encryptedResponse = hybridEncrypt(userPublicKey, responseData);
+      res.json({ encryptedResponse });
+    }
+  );
+});
 
 
 // Start the server
