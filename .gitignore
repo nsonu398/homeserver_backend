@@ -2,3 +2,5 @@ node_modules
 uploads
 thumbnails
 data
+imagenet_classes.json
+eng.traineddata
