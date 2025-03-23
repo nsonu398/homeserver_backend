@@ -714,7 +714,7 @@ async function processAndStoreImage(tempPath, originalFilename, username) {
     // Generate a unique filename
     const storageFilename = `${uuidv4()}${path.extname(originalFilename)}`;
     
-    // Create user directory if it doesn't exist
+    // Create useruploads/nsonu398@gmail.com/0ad9920d-4f79-46d6-95a9-50a698b9d3ca.jpg directory if it doesn't exist
     const userDir = path.join(UPLOADS_DIR, username);
     if (!fs.existsSync(userDir)) {
       fs.mkdirSync(userDir, { recursive: true });
