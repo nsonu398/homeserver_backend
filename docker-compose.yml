@@ -1,0 +1,14 @@
+version: '3'
+
+services:
+  homeserver:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/usr/src/app/data
+      - ./uploads:/usr/src/app/uploads
+    environment:
+      - PORT=3000
+      - JWT_SECRET=your_very_secure_jwt_secret_replace_this_in_production
+    restart: unless-stopped

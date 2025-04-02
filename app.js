@@ -758,43 +758,6 @@ async function processAndStoreImage(tempPath, originalFilename, username) {
   }
 }
 
-// Function to save image metadata to the database
-function saveImageToDatabase(username, originalFilename, imageInfo, imageId, updatedTime) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO images (
-        user_id, 
-        original_filename, 
-        storage_filename, 
-        path, 
-        size, 
-        resolution, 
-        upload_date, 
-        image_id, 
-        updated_time
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        username,
-        originalFilename,
-        imageInfo.storageFilename,
-        imageInfo.storagePath,
-        imageInfo.size,
-        imageInfo.resolution,
-        Date.now(),
-        imageId || null,  // Handle case where imageId might not be provided
-        updatedTime || Date.now()  // Use current time as fallback
-      ],
-      function(err) {
-        if (err) {
-          return reject(err);
-        }
-        
-        resolve(this.lastID);
-      }
-    );
-  });
-}
-
 // Function to get a user's public key from the database
 function getUserPublicKey(username) {
   return new Promise((resolve, reject) => {
@@ -868,6 +831,156 @@ app.get('/api/images', authenticateToken, (req, res) => {
   );
 });
 
+// Add to your app.js
+
+const fetch = require('node-fetch');
+
+// API key for CLIP service authentication
+const CLIP_API_KEY = 'your_secret_api_key_here'; // Must match the Python service
+const CLIP_SERVICE_URL = 'http://localhost:4000'; // Adjust to your Python service URL
+
+// Function to process image with CLIP service
+async function processImageWithCLIP(imageId, imagePath, userId, originalFilename) {
+  try {
+    const response = await fetch(`${CLIP_SERVICE_URL}/process`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': CLIP_API_KEY
+      },
+      body: JSON.stringify({
+        image_id: imageId,
+        file_path: imagePath,
+        user_id: userId,
+        original_filename: originalFilename
+      })
+    });
+    
+    const result = await response.json();
+    if (!result.success) {
+      console.error('CLIP processing failed:', result.error || 'Unknown error');
+      return false;
+    }
+    
+    console.log(`Image ${imageId} processed by CLIP service in ${result.process_time}s`);
+    return true;
+  } catch (error) {
+    console.error('Error calling CLIP service:', error);
+    return false;
+  }
+}
+
+// Modify your existing image upload endpoint
+// In the saveImageToDatabase function or after it completes successfully
+function saveImageToDatabase(username, originalFilename, imageInfo, imageId, updatedTime) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO images (
+        user_id, 
+        original_filename, 
+        storage_filename, 
+        path, 
+        size, 
+        resolution, 
+        upload_date, 
+        image_id, 
+        updated_time
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        username,
+        originalFilename,
+        imageInfo.storageFilename,
+        imageInfo.storagePath,
+        imageInfo.size,
+        imageInfo.resolution,
+        Date.now(),
+        imageId || null,
+        updatedTime || Date.now()
+      ],
+      async function(err) {
+        if (err) {
+          return reject(err);
+        }
+        
+        const dbImageId = this.lastID;
+        
+        // Process with CLIP service (non-blocking)
+        processImageWithCLIP(
+          dbImageId.toString(), 
+          imageInfo.storagePath,
+          username,
+          originalFilename
+        ).catch(err => {
+          console.error('CLIP processing error:', err);
+          // We're not waiting for this to complete, so any errors won't affect the upload flow
+        });
+        
+        resolve(dbImageId);
+      }
+    );
+  });
+}
+
+// Add a new search endpoint
+app.get('/api/images/search', authenticateToken, async (req, res) => {
+  try {
+    const { query } = req.query;
+    const username = req.user.username;
+    
+    if (!query || query.trim() === '') {
+      return res.status(400).json({ error: 'Search query is required' });
+    }
+    
+    // Call the Python CLIP service
+    const clipResponse = await fetch(`${CLIP_SERVICE_URL}/search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': CLIP_API_KEY
+      },
+      body: JSON.stringify({ 
+        query,
+        user_id: username, // Filter by user on the Python side
+        limit: 20 
+      })
+    });
+    
+    if (!clipResponse.ok) {
+      throw new Error(`CLIP search failed: ${clipResponse.statusText}`);
+    }
+    
+    const searchResults = await clipResponse.json();
+    
+    // Get user's public key for encrypting the response
+    const userPublicKey = await getUserPublicKey(username);
+    if (!userPublicKey) {
+      return res.status(400).json({ error: 'User public key not found' });
+    }
+    
+    // Format and encrypt response
+    const imageResults = searchResults.results.map(result => ({
+      id: result.id,
+      path: result.path,
+      filename: result.filename,
+      similarity: result.similarity,
+      url: `/api/images/${result.id}`
+    }));
+    
+    const responseData = JSON.stringify({
+      success: true,
+      results: imageResults,
+      query: searchResults.query,
+      search_time: searchResults.search_time
+    });
+    
+    const encryptedResponse = hybridEncrypt(userPublicKey, responseData);
+    res.json({ encryptedResponse });
+    
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Error performing search' });
+  }
+});
 
 // Start the server
 app.listen(PORT, () => {
